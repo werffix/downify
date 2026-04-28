@@ -126,8 +126,8 @@ def download_audio_from_youtube(query, output_path):
             'preferredquality': '192',
         }],
         'outtmpl': output_path,
-        'quiet': True,
-        'no_warnings': True,
+        'quiet': False,  # <--- ВАЖНО: Измените на False, чтобы видеть ошибки
+        'no_warnings': False,
         'default_search': 'ytsearch1',
     }
     try:
@@ -135,7 +135,7 @@ def download_audio_from_youtube(query, output_path):
             ydl.download([query])
         return True
     except Exception as e:
-        print(f"YouTube Error: {e}")
+        print(f"!!! YOUTUBE ERROR: {e}") # <--- Добавил явный принт ошибки
         return False
 
 def embed_metadata_wav(filepath, title, artist, cover_url):
