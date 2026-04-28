@@ -126,16 +126,17 @@ def download_audio_from_youtube(query, output_path):
             'preferredquality': '192',
         }],
         'outtmpl': output_path,
-        'quiet': False,  # <--- ВАЖНО: Измените на False, чтобы видеть ошибки
+        'quiet': False,
         'no_warnings': False,
         'default_search': 'ytsearch1',
+        'ffmpeg_location': '/usr/bin/ffmpeg',  # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([query])
         return True
     except Exception as e:
-        print(f"!!! YOUTUBE ERROR: {e}") # <--- Добавил явный принт ошибки
+        print(f"!!! YOUTUBE ERROR: {e}")
         return False
 
 def embed_metadata_wav(filepath, title, artist, cover_url):
