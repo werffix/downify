@@ -11,10 +11,19 @@ right to do so.
 ## Setup
 
 ```bash
-python3.11 -m venv .venv
+python3 --version  # must be 3.8+
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 cp .env.example .env
+```
+
+If `python3 -m venv` is missing on Ubuntu/Debian:
+
+```bash
+apt update
+apt install python3 python3-venv python3-pip
+python3 -m venv .venv
 ```
 
 Fill `.env`:
@@ -54,4 +63,3 @@ Provider code lives in `downify/providers/`. To add another legal platform:
 2. Implement `search(self, track: SpotifyTrack) -> ProviderTrack | None`.
 3. Return a direct legal `download_url`.
 4. Register it in `build_provider()` in `downify/bot.py`.
-
