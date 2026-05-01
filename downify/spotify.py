@@ -138,12 +138,17 @@ def embed_album_url(album_id: str) -> str:
 def parse_public_title(value: str) -> tuple[str, tuple[str, ...]]:
     title = _clean_title(value)
 
-    # Common page/oEmbed variants include "Track by Artist".
-    # Dash-separated titles are ambiguous (title-version vs title-artist),
-    # so we avoid guessing from dashes.
+# Common page/oEmbed variants include "Track by Artist" or "Track - Artist".
     by_match = re.match(r"(.+?)\s+by\s+(.+)$", title, flags=re.IGNORECASE)
     if by_match:
         return by_match.group(1).strip(), _split_artists(by_match.group(2))
+
+    dash_match = re.match(r"(.+?)\s+-\s+(.+)$", title)
+    if dash_match:
+        left, right = dash_match.group(1).strip(), dash_match.group(2).strip()
+        return right, _split_artists(left)
+        if not _looks_like_version(right):
+            return left, _split_artists(right)
 
     return title, ()
 
@@ -337,6 +342,26 @@ def _clean_title(value: str) -> str:
     title = re.sub(r"\s*\|\s*Spotify\s*$", "", title, flags=re.IGNORECASE)
     title = re.sub(r"^Spotify\s*-\s*", "", title, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", title).strip()
+
+
+def _looks_like_version(value: str) -> bool:
+    lowered = value.lower()
+    version_markers = (
+        "version",
+        "remix",
+        "remaster",
+        "edit",
+        "mix",
+        "deluxe",
+        "extended",
+        "radio",
+        "live",
+        "acoustic",
+        "instrumental",
+        "mono",
+        "stereo",
+    )
+    return any(marker in lowered for marker in version_markers)
 
 
 def _split_artists(value: str) -> tuple[str, ...]:
