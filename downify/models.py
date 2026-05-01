@@ -21,7 +21,8 @@ class SpotifyTrack:
     @property
     def caption(self) -> str:
         artist = ", ".join(self.artists)
-        return f"{artist} - {self.title}\n{self.album} ({self.release_date})"
+        heading = f"{artist} - {self.title}" if artist else self.title
+        return f"{heading}\n{self.album} ({self.release_date})"
 
 
 @dataclass(frozen=True)
@@ -47,4 +48,3 @@ class ProviderTrack:
 class DownloadedTrack:
     provider_track: ProviderTrack
     file_path: Path
-

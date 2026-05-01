@@ -1,8 +1,8 @@
 # Downify
 
-Telegram bot for Spotify links. It reads only Spotify release metadata (track names,
-album name, artists, release date and cover URL), then searches a separate legal
-download provider and sends the matched audio plus the cover file to the chat.
+Telegram bot for Spotify links. It reads public Spotify metadata from the link
+(release/track title and cover URL), then searches a separate legal download
+provider and sends the matched audio plus the cover file to the chat.
 
 The bundled provider is Jamendo, which is intended for Creative Commons / licensed
 downloads. Do not connect providers that download copyrighted audio without the
@@ -11,7 +11,7 @@ right to do so.
 ## Setup
 
 ```bash
-python3 --version  # must be 3.8+
+python3 --version  # must be 3.10+
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -29,7 +29,6 @@ python3 -m venv .venv
 Fill `.env`:
 
 - `TELEGRAM_BOT_TOKEN` from BotFather
-- `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` from Spotify Developer Dashboard
 - `JAMENDO_CLIENT_ID` from Jamendo Developer
 
 Run:
@@ -53,7 +52,9 @@ https://open.spotify.com/track/...
 https://open.spotify.com/album/...
 ```
 
-For albums, the bot processes up to `MAX_ALBUM_TRACKS` tracks. The default is `25`.
+Without Spotify Web API credentials, album links expose only public embed/page
+metadata, so the bot searches by the album/release title as one query. Track links
+work best because the public title usually maps directly to one song.
 
 ## Provider Notes
 

@@ -109,9 +109,10 @@ async def _process_track(
 
 def _release_summary(release: SpotifyRelease, track_count: int) -> str:
     artists = ", ".join(release.artists)
+    heading = f"{artists} - {release.title}" if artists else release.title
     return (
         f"Spotify metadata:\n"
-        f"{artists} - {release.title}\n"
+        f"{heading}\n"
         f"Дата релиза: {release.release_date}\n"
         f"Треков к обработке: {track_count}"
     )
@@ -140,7 +141,7 @@ def main() -> None:
 
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.bot_data["settings"] = settings
-    app.bot_data["spotify"] = SpotifyClient(settings.spotify_client_id, settings.spotify_client_secret)
+    app.bot_data["spotify"] = SpotifyClient()
     app.bot_data["provider"] = build_provider(settings)
 
     app.add_handler(CommandHandler("start", start))
@@ -151,4 +152,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

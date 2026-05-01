@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import base64
 import re
+from html import unescape
 from urllib.parse import urlparse
 
 import httpx
@@ -10,107 +10,89 @@ from downify.models import SpotifyRelease, SpotifyTrack
 
 
 class SpotifyClient:
-    token_url = "https://accounts.spotify.com/api/token"
-    api_base = "https://api.spotify.com/v1"
+    """Resolve public Spotify links without Spotify Web API credentials.
 
-    def __init__(self, client_id: str, client_secret: str) -> None:
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self._token: str | None = None
+    Spotify's Web API can require Premium access for app owners. This resolver uses
+    public metadata available for embeds/pages: title and cover. Full album track
+    lists and exact release dates are not available through this path.
+    """
+
+    oembed_url = "https://open.spotify.com/oembed"
+
+    def __init__(self) -> None:
+        pass
 
     async def resolve(self, url: str) -> SpotifyRelease:
-        kind, item_id = parse_spotify_url(url)
-        if kind == "track":
-            return await self._get_track_release(item_id)
+        normalized_url = normalize_spotify_url(url)
+        kind, _item_id = parse_spotify_url(normalized_url)
+        metadata = await self._get_public_metadata(normalized_url)
+
+        title, artists = parse_public_title(metadata.title)
         if kind == "album":
-            return await self._get_album_release(item_id)
-        raise ValueError("Поддерживаются только ссылки Spotify на трек или альбом.")
+            track_title = title
+            album_title = title
+        else:
+            track_title = title
+            album_title = title
 
-    async def _headers(self) -> dict[str, str]:
-        if self._token is None:
-            raw = f"{self.client_id}:{self.client_secret}".encode()
-            auth = base64.b64encode(raw).decode()
-            async with httpx.AsyncClient(timeout=20) as client:
-                response = await client.post(
-                    self.token_url,
-                    data={"grant_type": "client_credentials"},
-                    headers={"Authorization": f"Basic {auth}"},
-                )
-                response.raise_for_status()
-                self._token = response.json()["access_token"]
-        return {"Authorization": f"Bearer {self._token}"}
-
-    async def _get_track_release(self, track_id: str) -> SpotifyRelease:
-        data = await self._get_json(f"/tracks/{track_id}")
-        album = data["album"]
         track = SpotifyTrack(
-            title=data["name"],
-            artists=tuple(artist["name"] for artist in data["artists"]),
-            album=album["name"],
-            release_date=album["release_date"],
-            cover_url=_largest_image(album.get("images", [])),
-            track_number=data.get("track_number"),
+            title=track_title,
+            artists=artists,
+            album=album_title,
+            release_date="unknown",
+            cover_url=metadata.thumbnail_url,
+            track_number=None,
         )
+
         return SpotifyRelease(
-            kind="track",
-            title=track.title,
-            artists=track.artists,
-            release_date=track.release_date,
-            cover_url=track.cover_url,
+            kind=kind,
+            title=album_title,
+            artists=artists,
+            release_date="unknown",
+            cover_url=metadata.thumbnail_url,
             tracks=(track,),
         )
 
-    async def _get_album_release(self, album_id: str) -> SpotifyRelease:
-        album = await self._get_json(f"/albums/{album_id}")
-        album_title = album["name"]
-        artists = tuple(artist["name"] for artist in album["artists"])
-        release_date = album["release_date"]
-        cover_url = _largest_image(album.get("images", []))
+    async def _get_public_metadata(self, url: str) -> "_PublicMetadata":
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            oembed_response = await client.get(self.oembed_url, params={"url": url})
+            if oembed_response.status_code < 400:
+                data = oembed_response.json()
+                title = data.get("title")
+                if title:
+                    return _PublicMetadata(
+                        title=title,
+                        thumbnail_url=data.get("thumbnail_url"),
+                    )
 
-        tracks: list[SpotifyTrack] = []
-        items = list(album["tracks"]["items"])
-        next_url = album["tracks"].get("next")
-
-        while next_url:
-            page = await self._get_absolute_json(next_url)
-            items.extend(page["items"])
-            next_url = page.get("next")
-
-        for item in items:
-            tracks.append(
-                SpotifyTrack(
-                    title=item["name"],
-                    artists=tuple(artist["name"] for artist in item["artists"]) or artists,
-                    album=album_title,
-                    release_date=release_date,
-                    cover_url=cover_url,
-                    track_number=item.get("track_number"),
-                )
-            )
-
-        return SpotifyRelease(
-            kind="album",
-            title=album_title,
-            artists=artists,
-            release_date=release_date,
-            cover_url=cover_url,
-            tracks=tuple(tracks),
-        )
-
-    async def _get_json(self, path: str) -> dict:
-        return await self._get_absolute_json(f"{self.api_base}{path}")
-
-    async def _get_absolute_json(self, url: str) -> dict:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(url, headers=await self._headers())
-            response.raise_for_status()
-            return response.json()
+            page_response = await client.get(url)
+            page_response.raise_for_status()
+            return _parse_page_metadata(page_response.text)
 
 
-def parse_spotify_url(url: str) -> tuple[str, str]:
-    parsed = urlparse(url.strip())
+class _PublicMetadata:
+    def __init__(self, title: str, thumbnail_url: str | None = None) -> None:
+        self.title = title
+        self.thumbnail_url = thumbnail_url
+
+
+def normalize_spotify_url(value: str) -> str:
+    match = re.search(r"https?://[^\s]+", value.strip())
+    if not match:
+        raise ValueError("Пришлите Spotify-ссылку на трек или альбом.")
+
+    url = match.group(0).rstrip(").,]")
+    parsed = urlparse(url)
     if parsed.netloc not in {"open.spotify.com", "spotify.link"}:
-        raise ValueError("Пришлите ссылку open.spotify.com на трек или альбом.")
+        raise ValueError("Пришлите ссылку open.spotify.com или spotify.link.")
+
+    return url
+
+
+def parse_spotify_url(url: str) -> tuple[str, str | None]:
+    parsed = urlparse(url.strip())
+    if parsed.netloc == "spotify.link":
+        return "track", None
 
     match = re.search(r"/(track|album)/([A-Za-z0-9]+)", parsed.path)
     if not match:
@@ -118,8 +100,60 @@ def parse_spotify_url(url: str) -> tuple[str, str]:
     return match.group(1), match.group(2)
 
 
-def _largest_image(images: list[dict]) -> str | None:
-    if not images:
-        return None
-    return sorted(images, key=lambda image: image.get("width") or 0, reverse=True)[0]["url"]
+def parse_public_title(value: str) -> tuple[str, tuple[str, ...]]:
+    title = _clean_title(value)
 
+    # Common page/oEmbed variants include "Track by Artist", "Album by Artist",
+    # or "Artist - Track". Keep this parser conservative so search queries stay useful.
+    by_match = re.match(r"(.+?)\s+by\s+(.+)$", title, flags=re.IGNORECASE)
+    if by_match:
+        return by_match.group(1).strip(), _split_artists(by_match.group(2))
+
+    dash_match = re.match(r"(.+?)\s+-\s+(.+)$", title)
+    if dash_match:
+        left, right = dash_match.group(1).strip(), dash_match.group(2).strip()
+        return right, _split_artists(left)
+
+    return title, ()
+
+
+def _parse_page_metadata(html: str) -> _PublicMetadata:
+    og_title = _meta_content(html, "og:title") or _title_tag(html)
+    if not og_title:
+        raise ValueError("Spotify не отдал публичные метаданные по этой ссылке.")
+
+    return _PublicMetadata(
+        title=og_title,
+        thumbnail_url=_meta_content(html, "og:image"),
+    )
+
+
+def _meta_content(html: str, property_name: str) -> str | None:
+    patterns = [
+        rf'<meta\s+property=["\']{re.escape(property_name)}["\']\s+content=["\']([^"\']+)["\']',
+        rf'<meta\s+content=["\']([^"\']+)["\']\s+property=["\']{re.escape(property_name)}["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html, flags=re.IGNORECASE)
+        if match:
+            return _clean_title(match.group(1))
+    return None
+
+
+def _title_tag(html: str) -> str | None:
+    match = re.search(r"<title>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    return _clean_title(match.group(1))
+
+
+def _clean_title(value: str) -> str:
+    title = unescape(value)
+    title = re.sub(r"\s*\|\s*Spotify\s*$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^Spotify\s*-\s*", "", title, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", title).strip()
+
+
+def _split_artists(value: str) -> tuple[str, ...]:
+    artists = re.split(r"\s*,\s*|\s+&\s+|\s+and\s+", value.strip())
+    return tuple(artist for artist in artists if artist)

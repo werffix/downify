@@ -17,9 +17,11 @@ class DownloadProvider(ABC):
 
     async def download(self, provider_track: ProviderTrack, destination: Path) -> DownloadedTrack:
         destination.mkdir(parents=True, exist_ok=True)
-        safe_name = _safe_filename(
-            f"{' - '.join(provider_track.artists)} - {provider_track.title}.mp3"
+        artist = " - ".join(provider_track.artists)
+        display_name = (
+            f"{artist} - {provider_track.title}.mp3" if artist else f"{provider_track.title}.mp3"
         )
+        safe_name = _safe_filename(display_name)
         file_path = destination / safe_name
 
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
@@ -35,4 +37,3 @@ def _safe_filename(value: str) -> str:
     for char in value:
         keep.append(char if char.isalnum() or char in " ._-" else "_")
     return "".join(keep).strip()[:180] or "track.mp3"
-
