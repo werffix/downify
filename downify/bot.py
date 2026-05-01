@@ -58,6 +58,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _process_track(update, provider, track, settings.download_dir)
 
 
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled Telegram update error", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text(f"Ошибка обработки: {context.error}")
+
+
 async def _send_cover(update: Update, release: SpotifyRelease, download_dir: Path) -> None:
     if not release.cover_url:
         return
@@ -86,7 +92,7 @@ async def _process_track(
     download_dir: Path,
 ) -> None:
     message = update.effective_message
-    await message.chat.send_action(ChatAction.UPLOAD_AUDIO)
+    await message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
 
     found = await provider.search(track)
     if found is None:
@@ -146,6 +152,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(handle_error)
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
