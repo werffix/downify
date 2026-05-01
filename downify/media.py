@@ -9,7 +9,12 @@ class MediaError(RuntimeError):
     pass
 
 
-async def convert_to_wav(source: Path, destination: Path) -> Path:
+async def convert_to_wav(
+    source: Path,
+    destination: Path,
+    sample_rate: int = 22050,
+    channels: int = 1,
+) -> Path:
     if shutil.which("ffmpeg") is None:
         raise MediaError(
             "ffmpeg не установлен. Установите его на сервере: apt update && apt install ffmpeg"
@@ -25,9 +30,9 @@ async def convert_to_wav(source: Path, destination: Path) -> Path:
         "-acodec",
         "pcm_s16le",
         "-ar",
-        "44100",
+        str(sample_rate),
         "-ac",
-        "2",
+        str(channels),
         str(destination),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -38,4 +43,3 @@ async def convert_to_wav(source: Path, destination: Path) -> Path:
         raise MediaError(f"ffmpeg не смог сконвертировать аудио: {details}")
 
     return destination
-

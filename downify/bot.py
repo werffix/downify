@@ -65,11 +65,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await message.reply_text(_release_summary(release, len(tracks)))
 
     if release.kind == "album":
-        await _process_album(update, provider, release, tracks, settings.download_dir)
+        await _process_album(
+            update,
+            provider,
+            release,
+            tracks,
+            settings.download_dir,
+            settings.max_zip_part_mb * 1024 * 1024,
+            settings.wav_sample_rate,
+            settings.wav_channels,
+        )
         return
 
     for track in tracks:
-        await _process_track(update, provider, track, settings.download_dir)
+        await _process_track(
+            update,
+            provider,
+            track,
+            settings.download_dir,
+            settings.wav_sample_rate,
+            settings.wav_channels,
+        )
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -104,6 +120,8 @@ async def _process_track(
     provider: DownloadProvider,
     track: SpotifyTrack,
     download_dir: Path,
+    wav_sample_rate: int,
+    wav_channels: int,
 ) -> None:
     message = update.effective_message
     await message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
@@ -117,6 +135,8 @@ async def _process_track(
     wav_path = await convert_to_wav(
         downloaded.file_path,
         download_dir / "wav" / f"{_track_filename(track)}.wav",
+        sample_rate=wav_sample_rate,
+        channels=wav_channels,
     )
     license_suffix = f"\nЛицензия: {found.license_name}" if found.license_name else ""
     caption = f"{track.caption}\nИсточник: {found.source_name}{license_suffix}"
@@ -135,6 +155,9 @@ async def _process_album(
     release: SpotifyRelease,
     tracks: tuple[SpotifyTrack, ...],
     download_dir: Path,
+    max_zip_part_bytes: int,
+    wav_sample_rate: int,
+    wav_channels: int,
 ) -> None:
     message = update.effective_message
     album_dir = download_dir / "albums" / _safe_filename(release.title)
@@ -145,7 +168,13 @@ async def _process_album(
 
     for track in tracks:
         await message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
-        wav_path = await _download_track_wav(provider, track, album_dir)
+        wav_path = await _download_track_wav(
+            provider,
+            track,
+            album_dir,
+            wav_sample_rate,
+            wav_channels,
+        )
         if wav_path is None:
             missing.append(track.title)
         else:
@@ -155,25 +184,55 @@ async def _process_album(
         await message.reply_text("Не нашел легальные загрузки для треков альбома.")
         return
 
-    zip_path = album_dir / f"{_safe_filename(release.title)}.zip"
-    await asyncio.to_thread(_write_zip, zip_path, wav_files)
+    zip_parts = await asyncio.to_thread(
+        _write_zip_parts,
+        album_dir,
+        _safe_filename(release.title),
+        wav_files,
+        max_zip_part_bytes,
+    )
 
-    caption = f"{release.title}: {len(wav_files)} WAV-файлов"
-    if missing:
-        caption += f"\nНе найдено: {len(missing)}"
+    if not zip_parts:
+        await message.reply_text("Не получилось собрать ZIP-архив.")
+        return
 
-    with zip_path.open("rb") as zip_file:
-        await message.reply_document(
-            document=zip_file,
-            filename=zip_path.name,
-            caption=caption[:1024],
+    if len(zip_parts) > 1:
+        await message.reply_text(
+            f"WAV-архив получился большим, отправляю {len(zip_parts)} ZIP-частями."
         )
+
+    for index, zip_path in enumerate(zip_parts, start=1):
+        if zip_path.stat().st_size > max_zip_part_bytes:
+            size_mb = zip_path.stat().st_size / 1024 / 1024
+            limit_mb = max_zip_part_bytes / 1024 / 1024
+            await message.reply_text(
+                f"Не могу отправить {zip_path.name}: размер {size_mb:.1f} MB, "
+                f"лимит части {limit_mb:.0f} MB. "
+                "Попробуйте WAV_SAMPLE_RATE=16000 и WAV_CHANNELS=1."
+            )
+            continue
+
+        caption = f"{release.title}: {len(wav_files)} WAV-файлов"
+        if len(zip_parts) > 1:
+            caption += f"\nЧасть {index}/{len(zip_parts)}"
+        if missing:
+            caption += f"\nНе найдено: {len(missing)}"
+
+        await message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+        with zip_path.open("rb") as zip_file:
+            await message.reply_document(
+                document=zip_file,
+                filename=zip_path.name,
+                caption=caption[:1024],
+            )
 
 
 async def _download_track_wav(
     provider: DownloadProvider,
     track: SpotifyTrack,
     album_dir: Path,
+    wav_sample_rate: int,
+    wav_channels: int,
 ) -> Path | None:
     found = await provider.search(track)
     if found is None:
@@ -184,6 +243,8 @@ async def _download_track_wav(
     return await convert_to_wav(
         downloaded.file_path,
         album_dir / "wav" / f"{prefix}{_track_filename(track)}.wav",
+        sample_rate=wav_sample_rate,
+        channels=wav_channels,
     )
 
 
@@ -191,6 +252,58 @@ def _write_zip(zip_path: Path, files: list[Path]) -> None:
     with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as archive:
         for file_path in files:
             archive.write(file_path, arcname=file_path.name)
+
+
+def _write_zip_parts(
+    album_dir: Path,
+    base_name: str,
+    files: list[Path],
+    max_part_bytes: int,
+) -> list[Path]:
+    parts: list[list[Path]] = []
+    current: list[Path] = []
+    current_size = 0
+
+    for file_path in files:
+        file_size = file_path.stat().st_size
+        if current and current_size + file_size > max_part_bytes:
+            parts.append(current)
+            current = []
+            current_size = 0
+
+        current.append(file_path)
+        current_size += file_size
+
+    if current:
+        parts.append(current)
+
+    zip_paths: list[Path] = []
+    for index, part_files in enumerate(parts, start=1):
+        suffix = f".part{index:02d}" if len(parts) > 1 else ""
+        zip_path = album_dir / f"{base_name}{suffix}.zip"
+        _write_zip(zip_path, part_files)
+
+        if zip_path.stat().st_size > max_part_bytes and len(part_files) == 1:
+            split_paths = _split_large_file_zip(album_dir, base_name, index, part_files[0])
+            zip_path.unlink(missing_ok=True)
+            zip_paths.extend(split_paths)
+        else:
+            zip_paths.append(zip_path)
+
+    return zip_paths
+
+
+def _split_large_file_zip(
+    album_dir: Path,
+    base_name: str,
+    part_index: int,
+    file_path: Path,
+) -> list[Path]:
+    # A single WAV can exceed the bot upload limit. Keep it in its own zip so
+    # the user gets a precise filename and a clear Telegram-side error if needed.
+    zip_path = album_dir / f"{base_name}.part{part_index:02d}.zip"
+    _write_zip(zip_path, [file_path])
+    return [zip_path]
 
 
 def _release_summary(release: SpotifyRelease, track_count: int) -> str:

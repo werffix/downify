@@ -60,6 +60,17 @@ Track links are returned as `.wav` files. Album links are returned as a `.zip`
 archive containing the `.wav` files that were found on the configured legal
 provider.
 
+WAV files are large, so album archives are split into parts using
+`MAX_ZIP_PART_MB`. Defaults are tuned for Telegram Bot API uploads:
+
+```env
+MAX_ZIP_PART_MB=40
+WAV_SAMPLE_RATE=22050
+WAV_CHANNELS=1
+```
+
+If Telegram still says the file is too large, use `WAV_SAMPLE_RATE=16000`.
+
 ## Provider Notes
 
 Provider code lives in `downify/providers/`. To add another legal platform:
