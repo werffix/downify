@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import httpx
 from telegram import Update
@@ -9,6 +11,7 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from downify.config import Settings
+from downify.media import convert_to_wav
 from downify.models import SpotifyRelease, SpotifyTrack
 from downify.providers import DownloadProvider, JamendoProvider
 from downify.spotify import SpotifyClient
@@ -52,7 +55,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Лимит меняется через MAX_ALBUM_TRACKS."
         )
 
+    if release.kind == "album" and len(tracks) <= 1 and tracks[0].title == release.title:
+        await message.reply_text(
+            "Это ссылка на альбом, но публичная страница Spotify не отдала треклист. "
+            "Без Spotify API я не могу надежно узнать все треки альбома."
+        )
+        return
+
     await message.reply_text(_release_summary(release, len(tracks)))
+
+    if release.kind == "album":
+        await _process_album(update, provider, release, tracks, settings.download_dir)
+        return
 
     for track in tracks:
         await _process_track(update, provider, track, settings.download_dir)
@@ -99,18 +113,84 @@ async def _process_track(
         await message.reply_text(f"Не нашел легальную загрузку: {track.caption}")
         return
 
-    downloaded = await provider.download(found, download_dir / "audio")
+    downloaded = await provider.download(found, download_dir / "source")
+    wav_path = await convert_to_wav(
+        downloaded.file_path,
+        download_dir / "wav" / f"{_track_filename(track)}.wav",
+    )
     license_suffix = f"\nЛицензия: {found.license_name}" if found.license_name else ""
     caption = f"{track.caption}\nИсточник: {found.source_name}{license_suffix}"
 
-    with downloaded.file_path.open("rb") as audio_file:
-        await message.reply_audio(
-            audio=audio_file,
-            filename=downloaded.file_path.name,
+    with wav_path.open("rb") as audio_file:
+        await message.reply_document(
+            document=audio_file,
+            filename=wav_path.name,
             caption=caption[:1024],
-            title=track.title,
-            performer=", ".join(track.artists),
         )
+
+
+async def _process_album(
+    update: Update,
+    provider: DownloadProvider,
+    release: SpotifyRelease,
+    tracks: tuple[SpotifyTrack, ...],
+    download_dir: Path,
+) -> None:
+    message = update.effective_message
+    album_dir = download_dir / "albums" / _safe_filename(release.title)
+    wav_dir = album_dir / "wav"
+    wav_dir.mkdir(parents=True, exist_ok=True)
+    missing: list[str] = []
+    wav_files: list[Path] = []
+
+    for track in tracks:
+        await message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+        wav_path = await _download_track_wav(provider, track, album_dir)
+        if wav_path is None:
+            missing.append(track.title)
+        else:
+            wav_files.append(wav_path)
+
+    if not wav_files:
+        await message.reply_text("Не нашел легальные загрузки для треков альбома.")
+        return
+
+    zip_path = album_dir / f"{_safe_filename(release.title)}.zip"
+    await asyncio.to_thread(_write_zip, zip_path, wav_files)
+
+    caption = f"{release.title}: {len(wav_files)} WAV-файлов"
+    if missing:
+        caption += f"\nНе найдено: {len(missing)}"
+
+    with zip_path.open("rb") as zip_file:
+        await message.reply_document(
+            document=zip_file,
+            filename=zip_path.name,
+            caption=caption[:1024],
+        )
+
+
+async def _download_track_wav(
+    provider: DownloadProvider,
+    track: SpotifyTrack,
+    album_dir: Path,
+) -> Path | None:
+    found = await provider.search(track)
+    if found is None:
+        return None
+
+    downloaded = await provider.download(found, album_dir / "source")
+    prefix = f"{track.track_number:02d} " if track.track_number else ""
+    return await convert_to_wav(
+        downloaded.file_path,
+        album_dir / "wav" / f"{prefix}{_track_filename(track)}.wav",
+    )
+
+
+def _write_zip(zip_path: Path, files: list[Path]) -> None:
+    with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as archive:
+        for file_path in files:
+            archive.write(file_path, arcname=file_path.name)
 
 
 def _release_summary(release: SpotifyRelease, track_count: int) -> str:
@@ -129,6 +209,12 @@ def _safe_filename(value: str) -> str:
     for char in value:
         keep.append(char if char.isalnum() or char in " ._-" else "_")
     return "".join(keep).strip()[:120] or "cover"
+
+
+def _track_filename(track: SpotifyTrack) -> str:
+    artist = " - ".join(track.artists)
+    name = f"{artist} - {track.title}" if artist else track.title
+    return _safe_filename(name)
 
 
 def build_provider(settings: Settings) -> DownloadProvider:

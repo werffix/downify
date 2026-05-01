@@ -28,21 +28,33 @@ class SpotifyClient:
         metadata = await self._get_public_metadata(normalized_url)
 
         title, artists = parse_public_title(metadata.title)
-        if kind == "album":
-            track_title = title
-            album_title = title
-        else:
-            track_title = title
-            album_title = title
+        album_title = title
 
-        track = SpotifyTrack(
-            title=track_title,
-            artists=artists,
-            album=album_title,
-            release_date="unknown",
-            cover_url=metadata.thumbnail_url,
-            track_number=None,
-        )
+        if kind == "album":
+            page_html = metadata.html or await self._get_page_html(normalized_url)
+            tracks = _parse_album_tracks(page_html, album_title, artists, metadata.thumbnail_url)
+            if not tracks:
+                tracks = (
+                    SpotifyTrack(
+                        title=album_title,
+                        artists=artists,
+                        album=album_title,
+                        release_date="unknown",
+                        cover_url=metadata.thumbnail_url,
+                        track_number=None,
+                    ),
+                )
+        else:
+            tracks = (
+                SpotifyTrack(
+                    title=title,
+                    artists=artists,
+                    album=album_title,
+                    release_date="unknown",
+                    cover_url=metadata.thumbnail_url,
+                    track_number=None,
+                ),
+            )
 
         return SpotifyRelease(
             kind=kind,
@@ -50,7 +62,7 @@ class SpotifyClient:
             artists=artists,
             release_date="unknown",
             cover_url=metadata.thumbnail_url,
-            tracks=(track,),
+            tracks=tracks,
         )
 
     async def _get_public_metadata(self, url: str) -> "_PublicMetadata":
@@ -69,11 +81,23 @@ class SpotifyClient:
             page_response.raise_for_status()
             return _parse_page_metadata(page_response.text)
 
+    async def _get_page_html(self, url: str) -> str:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.text
+
 
 class _PublicMetadata:
-    def __init__(self, title: str, thumbnail_url: str | None = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        thumbnail_url: str | None = None,
+        html: str | None = None,
+    ) -> None:
         self.title = title
         self.thumbnail_url = thumbnail_url
+        self.html = html
 
 
 def normalize_spotify_url(value: str) -> str:
@@ -125,7 +149,54 @@ def _parse_page_metadata(html: str) -> _PublicMetadata:
     return _PublicMetadata(
         title=og_title,
         thumbnail_url=_meta_content(html, "og:image"),
+        html=html,
     )
+
+
+def _parse_album_tracks(
+    html: str,
+    album_title: str,
+    artists: tuple[str, ...],
+    cover_url: str | None,
+) -> tuple[SpotifyTrack, ...]:
+    tracks: dict[int, str] = {}
+    unescaped_html = unescape(html)
+
+    patterns = [
+        r'"trackNumber"\s*:\s*(\d+).*?"name"\s*:\s*"([^"]+)"',
+        r'"name"\s*:\s*"([^"]+)".{0,500}?"trackNumber"\s*:\s*(\d+)',
+        r'"track_number"\s*:\s*(\d+).*?"name"\s*:\s*"([^"]+)"',
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, unescaped_html, flags=re.IGNORECASE | re.DOTALL):
+            if len(match.groups()) != 2:
+                continue
+            first, second = match.group(1), match.group(2)
+            if first.isdigit():
+                number, name = int(first), second
+            else:
+                number, name = int(second), first
+            name = _clean_json_string(name)
+            if name and name.lower() != album_title.lower():
+                tracks.setdefault(number, name)
+
+    return tuple(
+        SpotifyTrack(
+            title=name,
+            artists=artists,
+            album=album_title,
+            release_date="unknown",
+            cover_url=cover_url,
+            track_number=number,
+        )
+        for number, name in sorted(tracks.items())
+    )
+
+
+def _clean_json_string(value: str) -> str:
+    value = value.encode().decode("unicode_escape", errors="ignore")
+    return _clean_title(value)
 
 
 def _meta_content(html: str, property_name: str) -> str | None:

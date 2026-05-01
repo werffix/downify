@@ -22,7 +22,7 @@ If `python3 -m venv` is missing on Ubuntu/Debian:
 
 ```bash
 apt update
-apt install python3 python3-venv python3-pip
+apt install python3 python3-venv python3-pip ffmpeg
 python3 -m venv .venv
 ```
 
@@ -53,8 +53,12 @@ https://open.spotify.com/album/...
 ```
 
 Without Spotify Web API credentials, album links expose only public embed/page
-metadata, so the bot searches by the album/release title as one query. Track links
-work best because the public title usually maps directly to one song.
+metadata. The bot tries to parse the album tracklist from the public Spotify page.
+If Spotify does not include the tracklist in the page HTML, the bot will say so.
+
+Track links are returned as `.wav` files. Album links are returned as a `.zip`
+archive containing the `.wav` files that were found on the configured legal
+provider.
 
 ## Provider Notes
 
