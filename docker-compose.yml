@@ -1,0 +1,11 @@
+services:
+  downify:
+    build: .
+    container_name: downify
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:${PORT:-8000}:8000"
+    volumes:
+      - ./downloads:/app/downloads

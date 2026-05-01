@@ -12,8 +12,8 @@ class MediaError(RuntimeError):
 async def convert_to_wav(
     source: Path,
     destination: Path,
-    sample_rate: int = 22050,
-    channels: int = 1,
+    sample_rate: int = 44100,
+    channels: int = 2,
 ) -> Path:
     if shutil.which("ffmpeg") is None:
         raise MediaError(

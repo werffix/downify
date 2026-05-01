@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Downify</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="home-shell">
+      <section class="download-panel" aria-label="Downify download form">
+        <h1>Downify</h1>
+        <form id="download-form" class="download-form">
+          <div class="input-row">
+            <input
+              id="spotify-url"
+              name="url"
+              type="url"
+              autocomplete="off"
+              placeholder="Spotify link"
+              required
+            />
+            <button class="paste-button" type="button" id="paste-button">Вставить</button>
+          </div>
+          <button class="download-button" type="submit">Скачать</button>
+        </form>
+        <p id="status" class="status-text" aria-live="polite"></p>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+

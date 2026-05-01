@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Downify Release</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="release-shell">
+      <section id="loading" class="release-loading">
+        <div class="loader"></div>
+        <p id="loading-text">Релиз парсится</p>
+      </section>
+
+      <section id="release" class="release-view hidden">
+        <a id="cover-link" class="cover-link" href="#">
+          <img id="cover" class="cover" alt="Release cover" />
+        </a>
+        <h1 id="release-title"></h1>
+        <p id="release-artists" class="artists"></p>
+        <a id="zip-link" class="primary-link hidden" href="#">Скачать ZIP</a>
+        <div id="single-track" class="single-track hidden"></div>
+        <section class="tracklist-section">
+          <h2>Треклист</h2>
+          <div id="tracklist" class="tracklist"></div>
+        </section>
+      </section>
+
+      <section id="error" class="error-view hidden">
+        <h1>Ошибка</h1>
+        <p id="error-text"></p>
+        <a class="secondary-link" href="/">Назад</a>
+      </section>
+    </main>
+    <script src="/static/release.js"></script>
+  </body>
+</html>
+
