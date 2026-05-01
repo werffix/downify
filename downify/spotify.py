@@ -24,15 +24,18 @@ class SpotifyClient:
 
     async def resolve(self, url: str) -> SpotifyRelease:
         normalized_url = normalize_spotify_url(url)
-        kind, _item_id = parse_spotify_url(normalized_url)
+        kind, item_id = parse_spotify_url(normalized_url)
         metadata = await self._get_public_metadata(normalized_url)
 
         title, artists = parse_public_title(metadata.title)
         album_title = title
 
         if kind == "album":
-            page_html = metadata.html or await self._get_page_html(normalized_url)
-            tracks = _parse_album_tracks(page_html, album_title, artists, metadata.thumbnail_url)
+            page_htmls = []
+            if item_id:
+                page_htmls.append(await self._get_page_html(embed_album_url(item_id)))
+            page_htmls.append(metadata.html or await self._get_page_html(normalized_url))
+            tracks = _parse_album_tracks(page_htmls, album_title, artists, metadata.thumbnail_url)
             if not tracks:
                 tracks = (
                     SpotifyTrack(
@@ -124,6 +127,10 @@ def parse_spotify_url(url: str) -> tuple[str, str | None]:
     return match.group(1), match.group(2)
 
 
+def embed_album_url(album_id: str) -> str:
+    return f"https://open.spotify.com/embed/album/{album_id}"
+
+
 def parse_public_title(value: str) -> tuple[str, tuple[str, ...]]:
     title = _clean_title(value)
 
@@ -154,18 +161,41 @@ def _parse_page_metadata(html: str) -> _PublicMetadata:
 
 
 def _parse_album_tracks(
-    html: str,
+    htmls: list[str],
     album_title: str,
     artists: tuple[str, ...],
     cover_url: str | None,
 ) -> tuple[SpotifyTrack, ...]:
     tracks: dict[int, str] = {}
-    unescaped_html = unescape(html)
+    for html in htmls:
+        for number, name in _parse_tracks_from_jsonish_html(html, album_title).items():
+            tracks.setdefault(number, name)
+        for number, name in _parse_tracks_from_visible_text(html, album_title).items():
+            tracks.setdefault(number, name)
 
+    return tuple(
+        SpotifyTrack(
+            title=name,
+            artists=artists,
+            album=album_title,
+            release_date="unknown",
+            cover_url=cover_url,
+            track_number=number,
+        )
+        for number, name in sorted(tracks.items())
+    )
+
+
+def _parse_tracks_from_jsonish_html(html: str, album_title: str) -> dict[int, str]:
+    tracks: dict[int, str] = {}
+    unescaped_html = unescape(html)
     patterns = [
         r'"trackNumber"\s*:\s*(\d+).*?"name"\s*:\s*"([^"]+)"',
         r'"name"\s*:\s*"([^"]+)".{0,500}?"trackNumber"\s*:\s*(\d+)',
         r'"track_number"\s*:\s*(\d+).*?"name"\s*:\s*"([^"]+)"',
+        r'"trackTitle"\s*:\s*"([^"]+)".{0,500}?"trackNumber"\s*:\s*(\d+)',
+        r'"trackName"\s*:\s*"([^"]+)".{0,500}?"trackNumber"\s*:\s*(\d+)',
+        r'"position"\s*:\s*(\d+).*?"name"\s*:\s*"([^"]+)"',
     ]
 
     for pattern in patterns:
@@ -181,22 +211,106 @@ def _parse_album_tracks(
             if name and name.lower() != album_title.lower():
                 tracks.setdefault(number, name)
 
-    return tuple(
-        SpotifyTrack(
-            title=name,
-            artists=artists,
-            album=album_title,
-            release_date="unknown",
-            cover_url=cover_url,
-            track_number=number,
-        )
-        for number, name in sorted(tracks.items())
-    )
+    href_tracks = _parse_track_links(unescaped_html, album_title)
+    for number, name in href_tracks.items():
+        tracks.setdefault(number, name)
+
+    return tracks
+
+
+def _parse_track_links(html: str, album_title: str) -> dict[int, str]:
+    tracks: dict[int, str] = {}
+    seen_ids: set[str] = set()
+    pattern = r'href=["\'](?:https://open\.spotify\.com)?/(?:embed/)?track/([A-Za-z0-9]+)[^"\']*["\']([^<]{0,120})'
+    for match in re.finditer(pattern, html, flags=re.IGNORECASE):
+        track_id = match.group(1)
+        if track_id in seen_ids:
+            continue
+        seen_ids.add(track_id)
+        nearby = _strip_tags(match.group(2))
+        name = _clean_title(nearby)
+        if name and name.lower() != album_title.lower():
+            tracks[len(tracks) + 1] = name
+    return tracks
+
+
+def _parse_tracks_from_visible_text(html: str, album_title: str) -> dict[int, str]:
+    text = re.sub(r"<(script|style)\b.*?</\1>", "\n", html, flags=re.IGNORECASE | re.DOTALL)
+    text = _strip_tags(text)
+    lines = [_clean_title(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+
+    tracks: dict[int, str] = {}
+    duration_pattern = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
+
+    for index, line in enumerate(lines):
+        if not duration_pattern.match(line):
+            continue
+
+        candidate = _previous_track_like_line(lines, index, album_title)
+        if candidate:
+            tracks.setdefault(len(tracks) + 1, candidate)
+
+    numbered = _parse_numbered_visible_text(lines, album_title)
+    for number, name in numbered.items():
+        tracks.setdefault(number, name)
+
+    return tracks
+
+
+def _previous_track_like_line(lines: list[str], duration_index: int, album_title: str) -> str | None:
+    ignored = {
+        album_title.lower(),
+        "preview",
+        "save on spotify",
+        "play on spotify",
+        "copy link",
+    }
+    for offset in range(1, 5):
+        index = duration_index - offset
+        if index < 0:
+            break
+        candidate = lines[index]
+        normalized = candidate.lower()
+        if normalized in ignored or normalized.isdigit() or re.match(r"^\d+\.\s*\d+$", normalized):
+            continue
+        if re.match(r"^\d{1,2}:\d{2}(?::\d{2})?$", candidate):
+            continue
+        return candidate
+    return None
+
+
+def _parse_numbered_visible_text(lines: list[str], album_title: str) -> dict[int, str]:
+    tracks: dict[int, str] = {}
+    for index, line in enumerate(lines):
+        number_match = re.match(r"^(\d{1,3})(?:\.|\s+)?$", line)
+        if not number_match:
+            continue
+        number = int(number_match.group(1))
+        for candidate in lines[index + 1 : index + 5]:
+            normalized = candidate.lower()
+            if (
+                not candidate
+                or candidate.isdigit()
+                or normalized == album_title.lower()
+                or re.match(r"^\d{1,2}:\d{2}(?::\d{2})?$", candidate)
+            ):
+                continue
+            tracks.setdefault(number, candidate)
+            break
+    return tracks
 
 
 def _clean_json_string(value: str) -> str:
     value = value.encode().decode("unicode_escape", errors="ignore")
     return _clean_title(value)
+
+
+def _strip_tags(value: str) -> str:
+    value = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
+    value = re.sub(r"</(p|div|li|h\d|span|a|button)>", "\n", value, flags=re.IGNORECASE)
+    value = re.sub(r"<[^>]+>", " ", value)
+    return unescape(value)
 
 
 def _meta_content(html: str, property_name: str) -> str | None:
