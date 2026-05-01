@@ -27,7 +27,8 @@ class SpotifyClient:
         kind, item_id = parse_spotify_url(normalized_url)
         metadata = await self._get_public_metadata(normalized_url)
 
-        title, artists = parse_public_title(metadata.title)
+        title, parsed_artists = parse_public_title(metadata.title)
+        artists = metadata.artists or parsed_artists
         album_title = title
 
         if kind == "album":
@@ -77,6 +78,7 @@ class SpotifyClient:
                 if title:
                     return _PublicMetadata(
                         title=title,
+                        artists=_split_artists(data.get("author_name", "")),
                         thumbnail_url=data.get("thumbnail_url"),
                     )
 
@@ -95,10 +97,12 @@ class _PublicMetadata:
     def __init__(
         self,
         title: str,
+        artists: tuple[str, ...] = (),
         thumbnail_url: str | None = None,
         html: str | None = None,
     ) -> None:
         self.title = title
+        self.artists = artists
         self.thumbnail_url = thumbnail_url
         self.html = html
 
@@ -134,8 +138,7 @@ def embed_album_url(album_id: str) -> str:
 def parse_public_title(value: str) -> tuple[str, tuple[str, ...]]:
     title = _clean_title(value)
 
-    # Common page/oEmbed variants include "Track by Artist", "Album by Artist",
-    # or "Artist - Track". Keep this parser conservative so search queries stay useful.
+    # Common page/oEmbed variants include "Track by Artist" or "Track - Artist".
     by_match = re.match(r"(.+?)\s+by\s+(.+)$", title, flags=re.IGNORECASE)
     if by_match:
         return by_match.group(1).strip(), _split_artists(by_match.group(2))
@@ -143,7 +146,8 @@ def parse_public_title(value: str) -> tuple[str, tuple[str, ...]]:
     dash_match = re.match(r"(.+?)\s+-\s+(.+)$", title)
     if dash_match:
         left, right = dash_match.group(1).strip(), dash_match.group(2).strip()
-        return right, _split_artists(left)
+        if not _looks_like_version(right):
+            return left, _split_artists(right)
 
     return title, ()
 
@@ -337,6 +341,26 @@ def _clean_title(value: str) -> str:
     title = re.sub(r"\s*\|\s*Spotify\s*$", "", title, flags=re.IGNORECASE)
     title = re.sub(r"^Spotify\s*-\s*", "", title, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", title).strip()
+
+
+def _looks_like_version(value: str) -> bool:
+    lowered = value.lower()
+    version_markers = (
+        "version",
+        "remix",
+        "remaster",
+        "edit",
+        "mix",
+        "deluxe",
+        "extended",
+        "radio",
+        "live",
+        "acoustic",
+        "instrumental",
+        "mono",
+        "stereo",
+    )
+    return any(marker in lowered for marker in version_markers)
 
 
 def _split_artists(value: str) -> tuple[str, ...]:
