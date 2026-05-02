@@ -69,18 +69,28 @@ class SpotifyClient:
             tracks=tracks,
         )
 
-    async def _get_public_metadata(self, url: str) -> "_PublicMetadata":
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            oembed_response = await client.get(self.oembed_url, params={"url": url})
-            if oembed_response.status_code < 400:
-                data = oembed_response.json()
-                title = data.get("title")
-                if title:
-                    return _PublicMetadata(
-                        title=title,
-                        artists=_split_artists(data.get("author_name", "")),
-                        thumbnail_url=data.get("thumbnail_url"),
-                    )
+async def _get_public_metadata(self, url: str) -> "_PublicMetadata":
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        # oEmbed
+        oembed_response = await client.get(self.oembed_url, params={"url": url})
+        if oembed_response.status_code < 400:
+            data = oembed_response.json()
+            title = data.get("title")
+            if title:
+                track_title, artists = parse_public_title(title)
+                if not artists:  # Если артистов не нашли — пытаемся из HTML
+                    page_resp = await client.get(url)
+                    artists = _extract_artists_from_html(page_resp.text)
+                return _PublicMetadata(
+                    title=track_title or title,
+                    artists=artists,
+                    thumbnail_url=data.get("thumbnail_url"),
+                )
+
+        # Fallback на полную страницу
+        page_response = await client.get(url)
+        page_response.raise_for_status()
+        return _parse_page_metadata(page_response.text)
 
             page_response = await client.get(url)
             page_response.raise_for_status()
@@ -137,19 +147,19 @@ def embed_album_url(album_id: str) -> str:
 
 def parse_public_title(value: str) -> tuple[str, tuple[str, ...]]:
     title = _clean_title(value)
+    if not title:
+        return title, ()
 
-# Common page/oEmbed variants include "Track by Artist" or "Track - Artist".
-    by_match = re.match(r"(.+?)\s+by\s+(.+)$", title, flags=re.IGNORECASE)
-    if by_match:
-        return by_match.group(1).strip(), _split_artists(by_match.group(2))
+    # Если в заголовке уже есть тире — пытаемся разделить
+    if re.search(r"\s*[-–—]\s*", title):
+        parts = re.split(r"\s*[-–—]\s*", title, maxsplit=1)
+        left, right = parts[0].strip(), parts[1].strip() if len(parts) > 1 else ""
+        
+        if right and any(word in right.lower() for word in ["remix", "slowed", "reverb", "edit", "version"]):
+            return left, ()
+        return left, _split_artists(right)
 
-    dash_match = re.match(r"(.+?)\s+-\s+(.+)$", title)
-    if dash_match:
-        left, right = dash_match.group(1).strip(), dash_match.group(2).strip()
-        return right, _split_artists(left)
-        if not _looks_like_version(right):
-            return left, _split_artists(right)
-
+    # Если артиста нет в заголовке — возвращаем только название
     return title, ()
 
 
@@ -367,3 +377,26 @@ def _looks_like_version(value: str) -> bool:
 def _split_artists(value: str) -> tuple[str, ...]:
     artists = re.split(r"\s*,\s*|\s+&\s+|\s+and\s+", value.strip())
     return tuple(artist for artist in artists if artist)
+
+def _extract_artists_from_html(html: str) -> tuple[str, ...]:
+    """Пытаемся вытащить артиста из HTML страницы Spotify"""
+    # Ищем в мета-тегах или JSON-структурах
+    patterns = [
+        r'"artist"\s*:\s*"([^"]+)"',
+        r'"artists"\s*:\s*\[\s*{"name"\s*:\s*"([^"]+)"',
+        r'<meta property="og:title"[^>]*content="[^"]+?[-–—]\s*([^"]+?)"',
+        r'by\s+([^<"]+)',
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, html, re.IGNORECASE)
+        if matches:
+            artists = []
+            for m in matches:
+                cleaned = _clean_title(m)
+                if cleaned and len(cleaned) > 1:
+                    artists.extend(_split_artists(cleaned))
+            if artists:
+                return tuple(dict.fromkeys(artists))  # убираем дубли
+    
+    return ()
