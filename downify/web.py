@@ -201,7 +201,8 @@ async def download_track_wav(
     track: SpotifyTrack,
     directory: Path,
 ) -> TrackResult:
-    result = TrackResult(title=track.title, artists=list(track.artists))
+    artists = list(track.artists) if track.artists and track.artists[0] != "Unknown Artist" else ["Unknown Artist"]
+    result = TrackResult(title=track.title, artists=artists)
     try:
         found = await download_provider.search(track)
         if found is None:
