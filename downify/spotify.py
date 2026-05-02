@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 from html import unescape
 from urllib.parse import urlparse
 
@@ -10,17 +11,9 @@ from downify.models import SpotifyRelease, SpotifyTrack
 
 
 class SpotifyClient:
-    """Resolve public Spotify links without Spotify Web API credentials.
-
-    Spotify's Web API can require Premium access for app owners. This resolver uses
-    public metadata available for embeds/pages: title and cover. Full album track
-    lists and exact release dates are not available through this path.
-    """
+    """Resolve public Spotify links without Spotify Web API credentials."""
 
     oembed_url = "https://open.spotify.com/oembed"
-
-    def __init__(self) -> None:
-        pass
 
     async def resolve(self, url: str) -> SpotifyRelease:
         normalized_url = normalize_spotify_url(url)
@@ -41,7 +34,7 @@ class SpotifyClient:
                 tracks = (
                     SpotifyTrack(
                         title=album_title,
-                        artists=artists,
+                        artists=artists or ("Unknown Artist",),
                         album=album_title,
                         release_date="unknown",
                         cover_url=metadata.thumbnail_url,
@@ -52,7 +45,7 @@ class SpotifyClient:
             tracks = (
                 SpotifyTrack(
                     title=title,
-                    artists=artists,
+                    artists=artists or ("Unknown Artist",),
                     album=album_title,
                     release_date="unknown",
                     cover_url=metadata.thumbnail_url,
@@ -63,35 +56,40 @@ class SpotifyClient:
         return SpotifyRelease(
             kind=kind,
             title=album_title,
-            artists=artists,
+            artists=artists or ("Unknown Artist",),
             release_date="unknown",
             cover_url=metadata.thumbnail_url,
             tracks=tracks,
         )
 
-async def _get_public_metadata(self, url: str) -> "_PublicMetadata":
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        # oEmbed
-        oembed_response = await client.get(self.oembed_url, params={"url": url})
-        if oembed_response.status_code < 400:
-            data = oembed_response.json()
-            title = data.get("title")
-            if title:
-                track_title, artists = parse_public_title(title)
-                if not artists:  # Если артистов не нашли — пытаемся из HTML
-                    page_resp = await client.get(url)
-                    artists = _extract_artists_from_html(page_resp.text)
-                return _PublicMetadata(
-                    title=track_title or title,
-                    artists=artists,
-                    thumbnail_url=data.get("thumbnail_url"),
-                )
+    async def _get_public_metadata(self, url: str) -> "_PublicMetadata":
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            # oEmbed + полная страница
+            oembed_response = await client.get(self.oembed_url, params={"url": url})
+            html = ""
+            if oembed_response.status_code < 400:
+                data = oembed_response.json()
+                title = data.get("title")
+                if title:
+                    # Загружаем полную страницу для structured data
+                    try:
+                        page_resp = await client.get(url)
+                        if page_resp.status_code < 400:
+                            html = page_resp.text
+                    except:
+                        pass
 
-        # Fallback на полную страницу
-        page_response = await client.get(url)
-        page_response.raise_for_status()
-        return _parse_page_metadata(page_response.text)
+                    structured = _extract_structured_data(html)
+                    artists = structured.get("artists", ())
 
+                    return _PublicMetadata(
+                        title=title,
+                        artists=artists,
+                        thumbnail_url=data.get("thumbnail_url"),
+                        html=html
+                    )
+
+            # Полный fallback
             page_response = await client.get(url)
             page_response.raise_for_status()
             return _parse_page_metadata(page_response.text)
@@ -115,6 +113,68 @@ class _PublicMetadata:
         self.artists = artists
         self.thumbnail_url = thumbnail_url
         self.html = html
+
+
+def _extract_structured_data(html: str) -> dict:
+    """Извлекает артистов и название из JSON-LD и встроенных JSON Spotify"""
+    if not html:
+        return {}
+
+    # JSON-LD
+    matches = re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
+    for match in matches:
+        try:
+            data = json.loads(match.strip())
+            if isinstance(data, dict) and data.get("@type") in ["MusicRecording", "MusicComposition", "MusicAlbum"]:
+                artists = []
+                by_artist = data.get("byArtist") or data.get("artist")
+                if isinstance(by_artist, dict):
+                    artists.append(by_artist.get("name"))
+                elif isinstance(by_artist, list):
+                    for a in by_artist:
+                        if isinstance(a, dict) and a.get("name"):
+                            artists.append(a.get("name"))
+                return {
+                    "name": data.get("name"),
+                    "artists": tuple(a for a in artists if a)
+                }
+        except:
+            continue
+
+    # Дополнительный поиск JSON
+    json_matches = re.findall(r'({[^{}]*"name"\s*:\s*"[^"]+"[^}]*"artists"[^}]*})', html, re.DOTALL)
+    for m in json_matches:
+        try:
+            data = json.loads(m)
+            if data.get("name"):
+                artists_raw = data.get("artists", [])
+                if isinstance(artists_raw, list):
+                    artist_names = []
+                    for a in artists_raw:
+                        if isinstance(a, dict):
+                            artist_names.append(a.get("name"))
+                        elif isinstance(a, str):
+                            artist_names.append(a)
+                    return {"name": data.get("name"), "artists": tuple(filter(None, artist_names))}
+        except:
+            continue
+
+    return {}
+
+
+def _parse_page_metadata(html: str) -> _PublicMetadata:
+    og_title = _meta_content(html, "og:title") or _title_tag(html)
+    if not og_title:
+        raise ValueError("Spotify не отдал публичные метаданные по этой ссылке.")
+
+    structured = _extract_structured_data(html)
+    
+    return _PublicMetadata(
+        title=structured.get("name") or og_title,
+        artists=structured.get("artists", ()),
+        thumbnail_url=_meta_content(html, "og:image"),
+        html=html,
+    )
 
 
 def normalize_spotify_url(value: str) -> str:
@@ -150,30 +210,25 @@ def parse_public_title(value: str) -> tuple[str, tuple[str, ...]]:
     if not title:
         return title, ()
 
-    # Если в заголовке уже есть тире — пытаемся разделить
-    if re.search(r"\s*[-–—]\s*", title):
-        parts = re.split(r"\s*[-–—]\s*", title, maxsplit=1)
-        left, right = parts[0].strip(), parts[1].strip() if len(parts) > 1 else ""
-        
-        if right and any(word in right.lower() for word in ["remix", "slowed", "reverb", "edit", "version"]):
+    dash_match = re.search(r"(.+?)\s*[-–—]\s*(.+?)(?:\s*\(|\s*$)", title)
+    if dash_match:
+        left, right = dash_match.group(1).strip(), dash_match.group(2).strip()
+        if any(x in right.lower() for x in ["slowed", "reverb", "remix", "edit", "version", "remaster"]):
             return left, ()
         return left, _split_artists(right)
 
-    # Если артиста нет в заголовке — возвращаем только название
     return title, ()
 
 
-def _parse_page_metadata(html: str) -> _PublicMetadata:
-    og_title = _meta_content(html, "og:title") or _title_tag(html)
-    if not og_title:
-        raise ValueError("Spotify не отдал публичные метаданные по этой ссылке.")
+def _split_artists(value: str) -> tuple[str, ...]:
+    if not value:
+        return ()
+    value = re.sub(r"\s*\(?(feat\.?|ft\.?|with|&|×)\s*", ",", value, flags=re.IGNORECASE)
+    artists = re.split(r"\s*,\s*|\s+&\s+|\s+and\s+|\s*×\s*", value)
+    return tuple(a.strip() for a in artists if a.strip() and len(a.strip()) > 1)
 
-    return _PublicMetadata(
-        title=og_title,
-        thumbnail_url=_meta_content(html, "og:image"),
-        html=html,
-    )
 
+# ====================== Ниже код без изменений ======================
 
 def _parse_album_tracks(
     htmls: list[str],
@@ -357,46 +412,12 @@ def _clean_title(value: str) -> str:
 def _looks_like_version(value: str) -> bool:
     lowered = value.lower()
     version_markers = (
-        "version",
-        "remix",
-        "remaster",
-        "edit",
-        "mix",
-        "deluxe",
-        "extended",
-        "radio",
-        "live",
-        "acoustic",
-        "instrumental",
-        "mono",
-        "stereo",
+        "version", "remix", "remaster", "edit", "mix", "deluxe", "extended",
+        "radio", "live", "acoustic", "instrumental", "mono", "stereo",
     )
     return any(marker in lowered for marker in version_markers)
 
 
-def _split_artists(value: str) -> tuple[str, ...]:
+def _split_artists(value: str) -> tuple[str, ...]:  # duplicate for safety
     artists = re.split(r"\s*,\s*|\s+&\s+|\s+and\s+", value.strip())
     return tuple(artist for artist in artists if artist)
-
-def _extract_artists_from_html(html: str) -> tuple[str, ...]:
-    """Пытаемся вытащить артиста из HTML страницы Spotify"""
-    # Ищем в мета-тегах или JSON-структурах
-    patterns = [
-        r'"artist"\s*:\s*"([^"]+)"',
-        r'"artists"\s*:\s*\[\s*{"name"\s*:\s*"([^"]+)"',
-        r'<meta property="og:title"[^>]*content="[^"]+?[-–—]\s*([^"]+?)"',
-        r'by\s+([^<"]+)',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, html, re.IGNORECASE)
-        if matches:
-            artists = []
-            for m in matches:
-                cleaned = _clean_title(m)
-                if cleaned and len(cleaned) > 1:
-                    artists.extend(_split_artists(cleaned))
-            if artists:
-                return tuple(dict.fromkeys(artists))  # убираем дубли
-    
-    return ()
