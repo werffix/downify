@@ -15,13 +15,13 @@ class SpotifyTrack:
 
     @property
     def query(self) -> str:
-        artist = self.artists[0] if self.artists else ""
+        artist = self.artists[0] if self.artists and self.artists[0] != "Unknown Artist" else ""
         return f"{artist} {self.title}".strip()
 
     @property
     def caption(self) -> str:
-        artist = ", ".join(self.artists)
-        heading = f"{artist} - {self.title}" if artist else self.title
+        artist = ", ".join(self.artists) if self.artists and self.artists[0] != "Unknown Artist" else "Unknown Artist"
+        heading = f"{artist} - {self.title}" if artist != "Unknown Artist" else self.title
         return f"{heading}\n{self.album} ({self.release_date})"
 
 
